@@ -1,9 +1,13 @@
 import re
 import traceback
 
+from atlassian import Jira as AtlassianJira
+
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import GithubProvider
 from pr_agent.git_providers import AzureDevopsProvider
+from pr_agent.git_providers.bitbucket_provider import BitbucketProvider
+from pr_agent.git_providers.bitbucket_server_provider import BitbucketServerProvider
 from pr_agent.log import get_logger
 
 # Compile the regex pattern once, outside the function
@@ -103,6 +107,78 @@ def extract_ticket_links_from_branch_name(branch_name, repo_path, base_url_html=
                 f"{base_url_html.strip('/')}/{repo_path}/issues/{issue_number}"
             )
     return list(github_tickets)
+
+
+def fetch_jira_ticket_details(ticket_id: str) -> dict | None:
+    MAX_TICKET_CHARACTERS = 10000
+    settings = get_settings()
+    jira_servers = settings.get("jira.jira_servers", None)
+    jira_api_token = settings.get("jira.jira_api_token", None)
+    jira_api_email = settings.get("jira.jira_api_email", None)
+    jira_base_url = settings.get("jira.jira_base_url", None)
+
+    if not jira_api_token:
+        return None
+
+    # Build list of (url, token, email) configs to try in order
+    configs = []
+    if jira_servers and isinstance(jira_servers, list):
+        tokens = jira_api_token if isinstance(jira_api_token, list) else [jira_api_token]
+        emails = jira_api_email if isinstance(jira_api_email, list) else ([jira_api_email] if jira_api_email else [])
+        for i, server_url in enumerate(jira_servers):
+            token = tokens[i] if i < len(tokens) else tokens[-1]
+            email = emails[i] if i < len(emails) else None
+            configs.append((server_url, token, email))
+    elif jira_base_url:
+        email = jira_api_email[0] if isinstance(jira_api_email, list) else jira_api_email
+        token = jira_api_token[0] if isinstance(jira_api_token, list) else jira_api_token
+        configs.append((jira_base_url, token, email))
+    else:
+        return None
+
+    for server_url, token, email in configs:
+        try:
+            is_cloud = "atlassian.net" in server_url
+            if email:
+                jira_client = AtlassianJira(url=server_url, username=email, password=token, cloud=is_cloud)
+            else:
+                jira_client = AtlassianJira(url=server_url, token=token)
+
+            issue = jira_client.get_issue(ticket_id)
+            if not issue:
+                continue
+
+            fields = issue.get("fields", {})
+            title = fields.get("summary", "")
+            body = fields.get("description") or ""
+            if isinstance(body, dict):
+                body = str(body)
+            if len(body) > MAX_TICKET_CHARACTERS:
+                body = body[:MAX_TICKET_CHARACTERS] + "..."
+            labels = fields.get("labels", [])
+
+            requirements = ""
+            for field_key in ["customfield_10016", "acceptance_criteria", "customfield_acceptance_criteria"]:
+                val = fields.get(field_key)
+                if val:
+                    requirements = str(val)
+                    break
+
+            return {
+                "ticket_id": ticket_id,
+                "ticket_url": f"{server_url.rstrip('/')}/browse/{ticket_id}",
+                "title": title,
+                "body": body,
+                "labels": ", ".join(labels) if labels else "",
+                "requirements": requirements,
+            }
+        except Exception as e:
+            get_logger().warning(
+                f"Failed to fetch Jira ticket {ticket_id} from {server_url}: {e}",
+                artifact={"traceback": traceback.format_exc()},
+            )
+
+    return None
 
 
 async def extract_tickets(git_provider):
@@ -215,6 +291,32 @@ async def extract_tickets(git_provider):
                         artifact={"traceback": traceback.format_exc()},
                     )
             return tickets_content
+
+        elif isinstance(git_provider, (BitbucketProvider, BitbucketServerProvider)):
+            user_description = git_provider.get_user_description() or ""
+            branch_name = git_provider.get_pr_branch() or ""
+
+            desc_tickets = find_jira_tickets(user_description)
+            branch_tickets = find_jira_tickets(branch_name)
+
+            seen: set = set()
+            all_tickets = []
+            for t in desc_tickets + branch_tickets:
+                if t not in seen:
+                    seen.add(t)
+                    all_tickets.append(t)
+
+            if len(all_tickets) > 3:
+                get_logger().info(f"Too many Jira tickets found for Bitbucket PR: {len(all_tickets)}")
+                all_tickets = all_tickets[:3]
+
+            tickets_content = []
+            for ticket_id in all_tickets:
+                ticket_details = fetch_jira_ticket_details(ticket_id)
+                if ticket_details:
+                    tickets_content.append(ticket_details)
+
+            return tickets_content if tickets_content else None
 
     except Exception as e:
         get_logger().error(f"Error extracting tickets error= {e}",
