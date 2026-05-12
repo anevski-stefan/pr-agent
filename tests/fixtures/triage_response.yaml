@@ -1,0 +1,15 @@
+triage:
+  file_risk_scores:
+    - file: src/auth.py
+      risk: 4
+    - file: src/utils.py
+      risk: 2
+  skill_triggers:
+    - security-and-hardening
+    - code-review-and-quality
+  initial_findings:
+    - relevant_file: src/auth.py
+      issue_header: Missing Rate Limit
+      issue_content: The login endpoint has no rate limiting, allowing brute force attacks on user credentials.
+      start_line: 15
+      end_line: 18
