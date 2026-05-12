@@ -1,0 +1,13 @@
+findings:
+  - relevant_file: src/auth.py
+    issue_header: SQL Injection Risk
+    issue_content: User input is interpolated directly into the query string on line 22, allowing SQL injection if the input is not sanitized upstream.
+    start_line: 22
+    end_line: 24
+    severity: high
+  - relevant_file: src/auth.py
+    issue_header: Exposed Token in Log
+    issue_content: The raw token value is logged at line 31. If logs are accessible to non-admin users, tokens can be harvested.
+    start_line: 31
+    end_line: 31
+    severity: medium

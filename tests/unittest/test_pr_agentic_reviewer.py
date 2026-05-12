@@ -8,6 +8,7 @@ from pr_agent.algo.skill_loader import SkillDefinition
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 TRIAGE_RESPONSE = (FIXTURES / "triage_response.yaml").read_text()
+SKILL_FINDING_RESPONSE = (FIXTURES / "skill_finding_response.yaml").read_text()
 SECURITY_MD = (FIXTURES / "skills" / "security_skill.md").read_text()
 
 
@@ -165,6 +166,155 @@ class TestRunTriage:
         result = asyncio.run(agent._run_triage([]))
         assert result.selected_skills == []
         assert result.initial_findings == []
+
+
+def _make_skill(name="security-and-hardening"):
+    return SkillDefinition(name=name, description="Security checks.", content=SECURITY_MD)
+
+
+def _make_triage(selected=("security-and-hardening",), risk_scores=None):
+    from pr_agent.tools.pr_agentic_reviewer import TriageResult
+    return TriageResult(
+        selected_skills=list(selected),
+        file_risk_scores=risk_scores or [{"file": "src/auth.py", "risk": 4}],
+        initial_findings=[],
+    )
+
+
+class TestRunSkillsParallel:
+    def test_empty_skills_returns_empty_list(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        agent = AgenticPRReviewer(reviewer)
+        result = asyncio.run(agent._run_skills_parallel([], _make_triage(selected=[])))
+        assert result == []
+        reviewer.ai_handler.chat_completion.assert_not_called()
+
+    def test_hard_cap_limits_skill_calls(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=(SKILL_FINDING_RESPONSE, "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        skills = [_make_skill(f"skill-{i}") for i in range(5)]
+        triage = _make_triage(selected=[s.name for s in skills])
+        get_settings().pr_reviewer_agent.agent_max_skill_calls = 3
+        try:
+            asyncio.run(agent._run_skills_parallel(skills, triage))
+            assert reviewer.ai_handler.chat_completion.call_count == 3
+        finally:
+            get_settings().pr_reviewer_agent.agent_max_skill_calls = 3
+
+    def test_findings_include_skill_name(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=(SKILL_FINDING_RESPONSE, "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        skill = _make_skill("security-and-hardening")
+        result = asyncio.run(agent._run_skills_parallel([skill], _make_triage()))
+        assert all(f.skill == "security-and-hardening" for f in result)
+
+    def test_high_risk_files_fetched_from_provider(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
+        reviewer.git_provider.get_pr_file_content.return_value = "def login(): pass"
+        agent = AgenticPRReviewer(reviewer)
+        triage = _make_triage(risk_scores=[{"file": "src/auth.py", "risk": 4}])
+        get_settings().pr_reviewer_agent.agent_min_risk_to_trigger = 3
+        asyncio.run(agent._run_skills_parallel([_make_skill()], triage))
+        reviewer.git_provider.get_pr_file_content.assert_called()
+
+    def test_low_risk_files_not_fetched(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        triage = _make_triage(risk_scores=[{"file": "src/utils.py", "risk": 1}])
+        get_settings().pr_reviewer_agent.agent_min_risk_to_trigger = 3
+        asyncio.run(agent._run_skills_parallel([_make_skill()], triage))
+        reviewer.git_provider.get_pr_file_content.assert_not_called()
+
+    def test_get_pr_file_content_exception_does_not_crash(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        reviewer.git_provider.get_pr_file_content.side_effect = Exception("Network error")
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        result = asyncio.run(agent._run_skills_parallel([_make_skill()], _make_triage()))
+        assert result == []
+
+    def test_one_skill_exception_does_not_cancel_others(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        call_count = 0
+
+        async def flaky(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("LLM error")
+            return (SKILL_FINDING_RESPONSE, "stop")
+
+        reviewer.ai_handler.chat_completion = flaky
+        agent = AgenticPRReviewer(reviewer)
+        skills = [_make_skill("skill-a"), _make_skill("skill-b")]
+        result = asyncio.run(agent._run_skills_parallel(skills, _make_triage(selected=["skill-a", "skill-b"])))
+        assert len(result) > 0
+
+    def test_sequential_mode_exception_does_not_cancel_others(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        call_count = 0
+
+        async def flaky(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("LLM error on first skill")
+            return (SKILL_FINDING_RESPONSE, "stop")
+
+        reviewer.ai_handler.chat_completion = flaky
+        agent = AgenticPRReviewer(reviewer)
+        get_settings().pr_reviewer_agent.agent_parallel_skills = False
+        try:
+            skills = [_make_skill("skill-a"), _make_skill("skill-b")]
+            result = asyncio.run(agent._run_skills_parallel(skills, _make_triage(selected=["skill-a", "skill-b"])))
+            assert len(result) > 0
+        finally:
+            get_settings().pr_reviewer_agent.agent_parallel_skills = True
+
+    def test_sequential_mode_respected(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        get_settings().pr_reviewer_agent.agent_parallel_skills = False
+        try:
+            skills = [_make_skill("skill-a"), _make_skill("skill-b")]
+            asyncio.run(agent._run_skills_parallel(skills, _make_triage(selected=["skill-a", "skill-b"])))
+            assert reviewer.ai_handler.chat_completion.call_count == 2
+        finally:
+            get_settings().pr_reviewer_agent.agent_parallel_skills = True
+
+    def test_per_skill_findings_capped(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+
+        big_response = "findings:\n" + "  - relevant_file: f.py\n    issue_header: Issue\n    issue_content: Desc.\n    start_line: 1\n    end_line: 1\n    severity: high\n" * 3
+        reviewer = _make_reviewer()
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=(big_response, "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        get_settings().pr_reviewer_agent.agent_max_findings_per_skill = 2
+        try:
+            result = asyncio.run(agent._run_skills_parallel([_make_skill()], _make_triage()))
+            assert len(result) <= 2
+        finally:
+            get_settings().pr_reviewer_agent.agent_max_findings_per_skill = 5
 
 
 class TestRun:
