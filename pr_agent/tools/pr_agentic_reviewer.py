@@ -1,6 +1,6 @@
 import asyncio
 import datetime
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import yaml
 from jinja2 import Environment, StrictUndefined
@@ -225,6 +225,33 @@ class AgenticPRReviewer:
         return findings
 
     # ------------------------------------------------------------------ #
+    # Merge phase                                                        #
+    # ------------------------------------------------------------------ #
+
+    _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+    def _merge_findings(self, triage_findings: list[dict], skill_findings: list[SkillFinding]) -> list[dict]:
+        skill_dicts = [asdict(f) for f in skill_findings]
+
+        merged = list(triage_findings)
+        for skill_finding in skill_dicts:
+            duplicate_idx = next(
+                (i for i, e in enumerate(merged)
+                 if e.get("relevant_file") == skill_finding["relevant_file"]
+                 and abs(e.get("start_line", 0) - skill_finding["start_line"]) <= 3),
+                None,
+            )
+            if duplicate_idx is not None:
+                merged[duplicate_idx] = skill_finding  
+            else:
+                merged.append(skill_finding)
+
+        merged.sort(key=lambda f: self._SEVERITY_ORDER.get(f.get("severity", "medium"), 2))
+
+        num_max = get_settings().pr_reviewer.num_max_findings
+        return merged[:num_max]
+
+    # ------------------------------------------------------------------ #
     # Publishing                                                         #
     # ------------------------------------------------------------------ #
 
@@ -247,7 +274,12 @@ class AgenticPRReviewer:
         skills = self._discover_skills()
         triage = await self._run_triage(skills)
 
-        self.reviewer.prediction = self._format_as_prediction(triage.initial_findings)
+        triggered_skills = [s for s in skills if s.name in triage.selected_skills]
+        skill_findings = await self._run_skills_parallel(triggered_skills, triage)
+
+        merged = self._merge_findings(triage.initial_findings, skill_findings)
+
+        self.reviewer.prediction = self._format_as_prediction(merged)
         pr_review = self.reviewer._prepare_pr_review()
 
         if pr_review and get_settings().config.publish_output:

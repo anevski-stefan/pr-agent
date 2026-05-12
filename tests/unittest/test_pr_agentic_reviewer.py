@@ -317,6 +317,112 @@ class TestRunSkillsParallel:
             get_settings().pr_reviewer_agent.agent_max_findings_per_skill = 5
 
 
+class TestMergeFindings:
+    def _triage_finding(self, file="src/auth.py", line=10, header="Triage Issue", severity="medium"):
+        return {"relevant_file": file, "issue_header": header, "issue_content": "desc", "start_line": line, "end_line": line + 1}
+
+    def _skill_finding(self, file="src/auth.py", line=10, header="Skill Issue", skill="security-and-hardening", severity="high"):
+        from pr_agent.tools.pr_agentic_reviewer import SkillFinding
+        return SkillFinding(relevant_file=file, issue_header=header, issue_content="desc",
+                            start_line=line, end_line=line + 1, skill=skill, severity=severity)
+
+    def test_merge_combines_both_sources(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        agent = AgenticPRReviewer(_make_reviewer())
+        triage = [self._triage_finding(line=5)]
+        skills = [self._skill_finding(line=20)]
+        result = agent._merge_findings(triage, skills)
+        assert len(result) == 2
+
+    def test_skill_finding_wins_on_same_location(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        agent = AgenticPRReviewer(_make_reviewer())
+        triage = [self._triage_finding(line=10, header="Triage")]
+        skills = [self._skill_finding(line=11, header="Skill")]  # within ±3
+        result = agent._merge_findings(triage, skills)
+        assert len(result) == 1
+        assert result[0]["issue_header"] == "Skill"
+
+    def test_no_dedup_different_files(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        agent = AgenticPRReviewer(_make_reviewer())
+        triage = [self._triage_finding(file="src/auth.py", line=10)]
+        skills = [self._skill_finding(file="src/utils.py", line=10)]
+        result = agent._merge_findings(triage, skills)
+        assert len(result) == 2
+
+    def test_no_dedup_lines_far_apart(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        agent = AgenticPRReviewer(_make_reviewer())
+        triage = [self._triage_finding(line=5)]
+        skills = [self._skill_finding(line=10)]  
+        result = agent._merge_findings(triage, skills)
+        assert len(result) == 2
+
+    def test_sort_order_critical_first(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        agent = AgenticPRReviewer(_make_reviewer())
+        skills = [
+            self._skill_finding(line=5, severity="low"),
+            self._skill_finding(line=10, severity="critical"),
+            self._skill_finding(line=15, severity="medium"),
+            self._skill_finding(line=20, severity="high"),
+        ]
+        get_settings().pr_reviewer.num_max_findings = 10
+        try:
+            result = agent._merge_findings([], skills)
+            severities = [r.get("severity", "medium") for r in result]
+            assert severities == ["critical", "high", "medium", "low"]
+        finally:
+            get_settings().pr_reviewer.num_max_findings = 3
+
+    def test_capped_at_num_max_findings(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        agent = AgenticPRReviewer(_make_reviewer())
+        skills = [self._skill_finding(line=i * 20) for i in range(5)]
+        get_settings().pr_reviewer.num_max_findings = 3
+        try:
+            result = agent._merge_findings([], skills)
+            assert len(result) == 3
+        finally:
+            get_settings().pr_reviewer.num_max_findings = 3
+
+    def test_skill_findings_have_skill_field(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        agent = AgenticPRReviewer(_make_reviewer())
+        skills = [self._skill_finding(skill="security-and-hardening")]
+        result = agent._merge_findings([], skills)
+        assert result[0].get("skill") == "security-and-hardening"
+
+    def test_empty_inputs_returns_empty(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        agent = AgenticPRReviewer(_make_reviewer())
+        assert agent._merge_findings([], []) == []
+
+
+class TestRunEndToEnd:
+    def test_run_calls_skill_execution_with_triggered_skills(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        agent = AgenticPRReviewer(reviewer)
+        skill = _make_skill("security-and-hardening")
+        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
+            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=[])):
+                asyncio.run(agent.run())
+        reviewer.ai_handler.chat_completion.assert_called()
+        reviewer.git_provider.publish_comment.assert_called()
+
+    def test_run_publishes_merged_output(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        agent = AgenticPRReviewer(reviewer)
+        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[]):
+            asyncio.run(agent.run())
+        reviewer.git_provider.publish_comment.assert_called_once()
+
+
 class TestRun:
     def test_run_publishes_when_findings_exist(self):
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer

@@ -36,6 +36,7 @@ triage:
       issue_content: Concrete description of the problem and when it manifests.
       start_line: 10
       end_line: 14
+      severity: critical|high|medium|low
 ```
 
 Rules:
@@ -43,6 +44,7 @@ Rules:
 - `file_risk_scores` must include every file in the diff.
 - `skill_triggers` must be empty list `[]` if no skills apply.
 - `initial_findings` must be empty list `[]` if no clear issues found.
+- `severity` in each finding must be exactly one of: critical, high, medium, low.
 - Never invent line numbers — use only lines visible in the diff.
 """
 

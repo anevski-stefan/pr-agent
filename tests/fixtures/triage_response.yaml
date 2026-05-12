@@ -13,3 +13,4 @@ triage:
       issue_content: The login endpoint has no rate limiting, allowing brute force attacks on user credentials.
       start_line: 15
       end_line: 18
+      severity: high
