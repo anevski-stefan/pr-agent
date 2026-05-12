@@ -374,3 +374,29 @@ pr_commands = [
     "/review",
     "/improve",
 ]
+
+[pr_reviewer_agent] # /review with agent_mode=true #
+# Set agent_mode=true to enable the agentic review pipeline.
+# When false (default), /review behaves identically to today.
+agent_mode = false
+
+# Cost controls
+agent_max_skill_calls = 3        # hard cap on parallel skill LLM calls per review
+agent_triage_model = ""          # cheap model for triage; empty = use config.model
+agent_skill_call_model = ""      # model for skill calls; empty = use config.model
+agent_min_risk_to_trigger = 3    # only fetch full file content for files with risk >= this
+
+# Skill selection — names must match .claude/skills/{name}/SKILL.md in the reviewed repo
+agent_review_skills = [
+    "code-review-and-quality",
+    "security-and-hardening",
+    "performance-optimization",
+    "frontend-ui-engineering",
+    "api-and-interface-design",
+    "code-simplification",
+    "test-driven-development",
+]
+
+# Execution
+agent_parallel_skills = true     # run skill calls in parallel via asyncio.gather
+agent_max_findings_per_skill = 5 # cap findings per skill to avoid noise
