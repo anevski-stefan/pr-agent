@@ -5,9 +5,9 @@ from dataclasses import asdict, dataclass, field
 import yaml
 from jinja2 import Environment, StrictUndefined
 
-from pr_agent.algo.pr_processing import get_pr_diff
+from pr_agent.algo.pr_processing import get_pr_diff, retry_with_fallback_models
 from pr_agent.algo.skill_loader import SkillDefinition, get_skill_descriptions_for_triage, load_review_skills
-from pr_agent.algo.utils import load_yaml
+from pr_agent.algo.utils import ModelType, load_yaml
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
@@ -242,7 +242,7 @@ class AgenticPRReviewer:
                 None,
             )
             if duplicate_idx is not None:
-                merged[duplicate_idx] = skill_finding  
+                merged[duplicate_idx] = skill_finding
             else:
                 merged.append(skill_finding)
 
@@ -266,12 +266,32 @@ class AgenticPRReviewer:
             review["security_concerns"] = "No"
         return yaml.dump({"review": review}, allow_unicode=True, default_flow_style=False)
 
+    def _publish_review(self, pr_review: str) -> None:
+        if pr_review and get_settings().config.publish_output:
+            self.reviewer.git_provider.publish_comment(pr_review)
+            self.reviewer.git_provider.remove_initial_comment()
+
+    async def _run_single_shot(self) -> None:
+        """Fall back to the standard single-shot review when no skills are available."""
+        await retry_with_fallback_models(self.reviewer._prepare_prediction, model_type=ModelType.REGULAR)
+        if not self.reviewer.prediction:
+            return
+        self._publish_review(self.reviewer._prepare_pr_review())
+
     async def run(self) -> None:
         if not self.git_provider.get_files():
             get_logger().info("PR has no files, skipping agentic review")
             return
 
         skills = self._discover_skills()
+        if not skills:
+            get_logger().warning(
+                "No review skills found — add SKILL.md files to .claude/skills/ in the repo "
+                "to enable agentic review. Falling back to single-shot review."
+            )
+            await self._run_single_shot()
+            return
+
         triage = await self._run_triage(skills)
 
         triggered_skills = [s for s in skills if s.name in triage.selected_skills]
@@ -280,8 +300,4 @@ class AgenticPRReviewer:
         merged = self._merge_findings(triage.initial_findings, skill_findings)
 
         self.reviewer.prediction = self._format_as_prediction(merged)
-        pr_review = self.reviewer._prepare_pr_review()
-
-        if pr_review and get_settings().config.publish_output:
-            self.reviewer.git_provider.publish_comment(pr_review)
-            self.reviewer.git_provider.remove_initial_comment()
+        self._publish_review(self.reviewer._prepare_pr_review())

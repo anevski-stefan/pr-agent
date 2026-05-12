@@ -338,7 +338,7 @@ class TestMergeFindings:
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
         agent = AgenticPRReviewer(_make_reviewer())
         triage = [self._triage_finding(line=10, header="Triage")]
-        skills = [self._skill_finding(line=11, header="Skill")]  # within ±3
+        skills = [self._skill_finding(line=11, header="Skill")]  
         result = agent._merge_findings(triage, skills)
         assert len(result) == 1
         assert result[0]["issue_header"] == "Skill"
@@ -418,8 +418,10 @@ class TestRunEndToEnd:
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
         reviewer = _make_reviewer()
         agent = AgenticPRReviewer(reviewer)
-        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[]):
-            asyncio.run(agent.run())
+        skill = _make_skill("security-and-hardening")
+        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
+            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=[])):
+                asyncio.run(agent.run())
         reviewer.git_provider.publish_comment.assert_called_once()
 
 
@@ -428,8 +430,10 @@ class TestRun:
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
         reviewer = _make_reviewer()
         agent = AgenticPRReviewer(reviewer)
-        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[]):
-            asyncio.run(agent.run())
+        skill = _make_skill("security-and-hardening")
+        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
+            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=[])):
+                asyncio.run(agent.run())
         reviewer.git_provider.publish_comment.assert_called()
 
     def test_run_no_files_returns_early(self):
@@ -439,3 +443,55 @@ class TestRun:
         agent = AgenticPRReviewer(reviewer)
         asyncio.run(agent.run())
         reviewer.ai_handler.chat_completion.assert_not_called()
+
+
+class TestGracefulDegradation:
+    def test_no_skills_falls_back_to_single_shot(self):
+        """When no skills are found, run() falls back to single-shot review without crashing."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        agent = AgenticPRReviewer(reviewer)
+        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[]):
+            with patch.object(agent, "_run_single_shot", new=AsyncMock()) as mock_fallback:
+                asyncio.run(agent.run())
+                mock_fallback.assert_called_once()
+        reviewer.ai_handler.chat_completion.assert_not_called()
+
+    def test_no_skills_does_not_call_triage(self):
+        """Triage LLM call is skipped entirely when no skills are available."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        agent = AgenticPRReviewer(reviewer)
+        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[]):
+            with patch.object(agent, "_run_single_shot", new=AsyncMock()):
+                asyncio.run(agent.run())
+        reviewer.ai_handler.chat_completion.assert_not_called()
+
+    def test_all_skills_fail_triage_findings_still_published(self):
+        """If all skill LLM calls fail, triage initial_findings are still published."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        call_count = 0
+        async def fail_on_skill(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:  
+                raise Exception("Skill LLM down")
+            return (TRIAGE_RESPONSE, "stop")
+        reviewer.ai_handler.chat_completion = fail_on_skill
+        agent = AgenticPRReviewer(reviewer)
+        skill = _make_skill("security-and-hardening")
+        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
+            asyncio.run(agent.run())
+        reviewer.git_provider.publish_comment.assert_called()
+
+    def test_provider_without_get_pr_file_content_uses_diff_only(self):
+        """If provider raises AttributeError on get_pr_file_content, skill still runs with diff."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        reviewer.git_provider.get_pr_file_content.side_effect = AttributeError("not supported")
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        triage = _make_triage(risk_scores=[{"file": "src/auth.py", "risk": 4}])
+        result = asyncio.run(agent._run_skills_parallel([_make_skill()], triage))
+        assert result == []
