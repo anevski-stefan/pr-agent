@@ -119,6 +119,10 @@ class PRReviewer:
 
     async def run(self) -> None:
         try:
+            if get_settings().pr_reviewer_agent.get("agent_mode", False):
+                from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+                return await AgenticPRReviewer(self).run()
+
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
                 return None
