@@ -129,14 +129,20 @@ class AgenticPRReviewer:
         skill_model = get_settings().pr_reviewer_agent.get("agent_skill_call_model", "")
         return skill_model if skill_model else get_settings().config.model
 
-    def _fetch_file_contexts(self, files: list[str]) -> dict[str, str]:
+    def _fetch_file_contexts(self, files: list[str],
+                             cache: dict[str, str] | None = None) -> dict[str, str]:
         branch = self.vars.get("branch", "")
         contexts: dict[str, str] = {}
         for file in files:
+            if cache is not None and file in cache:
+                contexts[file] = cache[file]
+                continue
             try:
                 content = self.git_provider.get_pr_file_content(file, branch)
                 if content:
                     contexts[file] = content
+                    if cache is not None:
+                        cache[file] = content
             except Exception as e:
                 get_logger().warning(f"Could not fetch content for '{file}': {e}")
         return contexts
@@ -144,8 +150,17 @@ class AgenticPRReviewer:
     def _build_skill_system_prompt(self, skill: SkillDefinition) -> str:
         return _SKILL_REVIEW_WRAPPER + skill.content
 
-    def _build_skill_user_prompt(self, diff: str, file_contexts: dict[str, str]) -> str:
+    def _build_skill_user_prompt(self, diff: str, file_contexts: dict[str, str],
+                                 previous_findings: list[dict] | None = None) -> str:
         parts = []
+        if previous_findings:
+            parts.append("Issues found in a previous review pass (use these as context to look deeper):")
+            for f in previous_findings:
+                parts.append(
+                    f"- {f.get('relevant_file', '')} line {f.get('start_line', '?')}: "
+                    f"{f.get('issue_header', '')} — {f.get('issue_content', '')[:120]}"
+                )
+            parts.append("\n")
         if file_contexts:
             parts.append("Full file contents for high-risk files:")
             for path, content in file_contexts.items():
@@ -180,9 +195,11 @@ class AgenticPRReviewer:
         max_per_skill = get_settings().pr_reviewer_agent.agent_max_findings_per_skill
         return findings[:max_per_skill]
 
-    async def _run_skill(self, skill: SkillDefinition, model: str, diff: str, file_contexts: dict[str, str]) -> list[SkillFinding]:
+    async def _run_skill(self, skill: SkillDefinition, model: str, diff: str,
+                         file_contexts: dict[str, str],
+                         previous_findings: list[dict] | None = None) -> list[SkillFinding]:
         system = self._build_skill_system_prompt(skill)
-        user = self._build_skill_user_prompt(diff, file_contexts)
+        user = self._build_skill_user_prompt(diff, file_contexts, previous_findings)
         response, _ = await self.ai_handler.chat_completion(
             model=model,
             temperature=get_settings().config.temperature,
@@ -191,7 +208,9 @@ class AgenticPRReviewer:
         )
         return self._parse_skill_response(response, skill.name)
 
-    async def _run_skills_parallel(self, triggered_skills: list[SkillDefinition], triage: TriageResult) -> list[SkillFinding]:
+    async def _run_skills_parallel(self, triggered_skills: list[SkillDefinition], triage: TriageResult,
+                                   previous_findings: list[dict] | None = None,
+                                   file_context_cache: dict[str, str] | None = None) -> list[SkillFinding]:
         if not triggered_skills:
             return []
 
@@ -201,10 +220,16 @@ class AgenticPRReviewer:
 
         min_risk = get_settings().pr_reviewer_agent.agent_min_risk_to_trigger
         high_risk_files = [f["file"] for f in triage.file_risk_scores if f.get("risk", 0) >= min_risk]
-        file_contexts = self._fetch_file_contexts(high_risk_files)
+
+        if previous_findings:
+            prev_files = {f.get("relevant_file", "") for f in previous_findings if f.get("relevant_file")}
+            high_risk_files = list(dict.fromkeys(high_risk_files + list(prev_files)))
+
+        file_contexts = self._fetch_file_contexts(high_risk_files, cache=file_context_cache)
         diff = self.reviewer.patches_diff or ""
 
-        coros = [self._run_skill(skill, model, diff, file_contexts) for skill in skills_to_run]
+        coros = [self._run_skill(skill, model, diff, file_contexts, previous_findings)
+                 for skill in skills_to_run]
 
         if get_settings().pr_reviewer_agent.get("agent_parallel_skills", True):
             raw_results = await asyncio.gather(*coros, return_exceptions=True)
@@ -229,6 +254,7 @@ class AgenticPRReviewer:
     # ------------------------------------------------------------------ #
 
     _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    _MAX_PREVIOUS_FINDINGS_CONTEXT = 20  
 
     def _merge_findings(self, triage_findings: list[dict], skill_findings: list[SkillFinding]) -> list[dict]:
         skill_dicts = [asdict(f) for f in skill_findings]
@@ -293,11 +319,23 @@ class AgenticPRReviewer:
             return
 
         triage = await self._run_triage(skills)
-
         triggered_skills = [s for s in skills if s.name in triage.selected_skills]
-        skill_findings = await self._run_skills_parallel(triggered_skills, triage)
 
-        merged = self._merge_findings(triage.initial_findings, skill_findings)
+        max_passes = get_settings().pr_reviewer_agent.get("agent_max_passes", 1)
+        all_skill_findings: list[SkillFinding] = []
+        cached_file_contexts: dict[str, str] = {}  
+
+        for pass_num in range(max_passes):
+            get_logger().info(f"Agentic review pass {pass_num + 1}/{max_passes}")
+            previous = [asdict(f) for f in all_skill_findings][:self._MAX_PREVIOUS_FINDINGS_CONTEXT] or None
+            pass_findings = await self._run_skills_parallel(
+                triggered_skills, triage,
+                previous_findings=previous,
+                file_context_cache=cached_file_contexts,
+            )
+            all_skill_findings.extend(pass_findings)
+
+        merged = self._merge_findings(triage.initial_findings, all_skill_findings)
 
         self.reviewer.prediction = self._format_as_prediction(merged)
         self._publish_review(self.reviewer._prepare_pr_review())

@@ -400,3 +400,4 @@ agent_review_skills = [
 # Execution
 agent_parallel_skills = true     # run skill calls in parallel via asyncio.gather
 agent_max_findings_per_skill = 5 # cap findings per skill to avoid noise
+agent_max_passes = 1             # number of review passes (1 = single pass, 2 = pass 2 uses pass 1 findings as context)

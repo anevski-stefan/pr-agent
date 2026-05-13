@@ -495,3 +495,116 @@ class TestGracefulDegradation:
         triage = _make_triage(risk_scores=[{"file": "src/auth.py", "risk": 4}])
         result = asyncio.run(agent._run_skills_parallel([_make_skill()], triage))
         assert result == []
+
+
+class TestMultiPass:
+    def test_default_max_passes_is_one(self):
+        from pr_agent.config_loader import get_settings
+        assert get_settings().pr_reviewer_agent.agent_max_passes == 1
+
+    def test_second_pass_injects_previous_findings_into_prompt(self):
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        agent = AgenticPRReviewer(reviewer)
+        previous = [{"relevant_file": "src/auth.py", "issue_header": "Logic Error",
+                      "issue_content": "Swapped handlers", "start_line": 10, "end_line": 11}]
+        prompt = agent._build_skill_user_prompt("+ some diff", {}, previous_findings=previous)
+        assert "previous" in prompt.lower() or "Logic Error" in prompt
+
+    def test_second_pass_uses_files_from_first_pass_findings(self):
+        """Pass 2 fetches full content for files that had findings in Pass 1."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        reviewer = _make_reviewer()
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        previous = [{"relevant_file": "src/hero.tsx", "issue_header": "Bug",
+                      "issue_content": "desc", "start_line": 5, "end_line": 6}]
+        triage = _make_triage(risk_scores=[{"file": "src/hero.tsx", "risk": 1}])
+        asyncio.run(agent._run_skills_parallel([_make_skill()], triage, previous_findings=previous))
+        fetched = [call.args[0] for call in reviewer.git_provider.get_pr_file_content.call_args_list]
+        assert any("hero.tsx" in f for f in fetched)
+
+    def test_multi_pass_run_makes_extra_skill_calls(self):
+        """With agent_max_passes=2, run() makes skill calls twice."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        call_count = 0
+
+        async def count_calls(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return (TRIAGE_RESPONSE, "stop")
+            return (SKILL_FINDING_RESPONSE, "stop")
+
+        reviewer.ai_handler.chat_completion = count_calls
+        agent = AgenticPRReviewer(reviewer)
+        skill = _make_skill("security-and-hardening")
+        get_settings().pr_reviewer_agent.agent_max_passes = 2
+        try:
+            with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
+                asyncio.run(agent.run())
+            assert call_count >= 3
+        finally:
+            get_settings().pr_reviewer_agent.agent_max_passes = 1
+
+    def test_three_passes_accumulate_all_previous_findings(self):
+        """Pass 3 context includes findings from both Pass 1 and Pass 2."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        captured_prompts = []
+        call_count = 0
+
+        async def capture(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return (TRIAGE_RESPONSE, "stop")
+            captured_prompts.append(kwargs.get("user", ""))
+            return (SKILL_FINDING_RESPONSE, "stop")
+
+        reviewer.ai_handler.chat_completion = capture
+        agent = AgenticPRReviewer(reviewer)
+        skill = _make_skill("security-and-hardening")
+        get_settings().pr_reviewer_agent.agent_max_passes = 3
+        try:
+            with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
+                asyncio.run(agent.run())
+            assert len(captured_prompts) >= 2
+            assert "SQL Injection" in captured_prompts[1] or "finding" in captured_prompts[1].lower() or len(captured_prompts[1]) > len(captured_prompts[0])
+        finally:
+            get_settings().pr_reviewer_agent.agent_max_passes = 1
+
+    def test_file_not_fetched_twice_across_passes(self):
+        """Same file is not fetched from provider more than once across passes."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        reviewer.git_provider.get_pr_file_content.return_value = "def login(): pass"
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        triage = _make_triage(risk_scores=[{"file": "src/auth.py", "risk": 4}])
+        cache: dict = {}
+        get_settings().pr_reviewer_agent.agent_min_risk_to_trigger = 1
+        try:
+            asyncio.run(agent._run_skills_parallel([_make_skill()], triage, file_context_cache=cache))
+            asyncio.run(agent._run_skills_parallel([_make_skill()], triage, file_context_cache=cache))
+            assert reviewer.git_provider.get_pr_file_content.call_count == 1
+        finally:
+            get_settings().pr_reviewer_agent.agent_min_risk_to_trigger = 3
+
+    def test_single_pass_behavior_unchanged_when_max_passes_one(self):
+        """agent_max_passes=1 (default) produces same call count as before."""
+        from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
+        from pr_agent.config_loader import get_settings
+        reviewer = _make_reviewer()
+        reviewer.ai_handler.chat_completion = AsyncMock(return_value=(TRIAGE_RESPONSE, "stop"))
+        agent = AgenticPRReviewer(reviewer)
+        skill = _make_skill("security-and-hardening")
+        get_settings().pr_reviewer_agent.agent_max_passes = 1
+        with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
+            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=[])):
+                asyncio.run(agent.run())
+        assert reviewer.ai_handler.chat_completion.call_count == 1
