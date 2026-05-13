@@ -281,11 +281,21 @@ class AgenticPRReviewer:
     # Publishing                                                         #
     # ------------------------------------------------------------------ #
 
-    def _format_as_prediction(self, findings: list[dict]) -> str:
+    def _estimate_effort(self, triage: TriageResult) -> int:
+        """Derive effort score 1-5 from triage file count and risk scores."""
+        if not triage.file_risk_scores:
+            return 1
+        scores = [f.get("risk", 1) for f in triage.file_risk_scores]
+        avg_risk = sum(scores) / len(scores)
+        num_files = len(scores)
+        raw = (avg_risk / 5) * 3 + (min(num_files, 20) / 20) * 2
+        return max(1, min(5, round(raw)))
+
+    def _format_as_prediction(self, findings: list[dict], triage: TriageResult | None = None) -> str:
         """Convert findings into the YAML format PRReviewer._prepare_pr_review() expects."""
         review: dict = {"key_issues_to_review": findings or []}
         if get_settings().pr_reviewer.require_estimate_effort_to_review:
-            review["estimated_effort_to_review_[1-5]"] = 1
+            review["estimated_effort_to_review_[1-5]"] = self._estimate_effort(triage) if triage else 1
         if get_settings().pr_reviewer.require_tests_review:
             review["relevant_tests"] = "No"
         if get_settings().pr_reviewer.require_security_review:
@@ -337,5 +347,5 @@ class AgenticPRReviewer:
 
         merged = self._merge_findings(triage.initial_findings, all_skill_findings)
 
-        self.reviewer.prediction = self._format_as_prediction(merged)
+        self.reviewer.prediction = self._format_as_prediction(merged, triage)
         self._publish_review(self.reviewer._prepare_pr_review())
