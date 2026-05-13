@@ -262,7 +262,7 @@ class AgenticPRReviewer:
     # ------------------------------------------------------------------ #
 
     _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    _MAX_PREVIOUS_FINDINGS_CONTEXT = 20  
+    _MAX_PREVIOUS_FINDINGS_CONTEXT = 20
 
     def _merge_findings(self, triage_findings: list[dict], skill_findings: list[SkillFinding]) -> list[dict]:
         skill_dicts = [asdict(f) for f in skill_findings]
@@ -282,7 +282,10 @@ class AgenticPRReviewer:
 
         merged.sort(key=lambda f: self._SEVERITY_ORDER.get(f.get("severity", "medium"), 2))
 
-        num_max = get_settings().pr_reviewer.num_max_findings
+        num_max = get_settings().pr_reviewer_agent.get(
+            "agent_max_total_findings",
+            get_settings().pr_reviewer.num_max_findings,
+        )
         return merged[:num_max]
 
     # ------------------------------------------------------------------ #

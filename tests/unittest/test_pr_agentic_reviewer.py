@@ -382,12 +382,13 @@ class TestMergeFindings:
         from pr_agent.config_loader import get_settings
         agent = AgenticPRReviewer(_make_reviewer())
         skills = [self._skill_finding(line=i * 20) for i in range(5)]
-        get_settings().pr_reviewer.num_max_findings = 3
+        original = get_settings().pr_reviewer_agent.agent_max_total_findings
+        get_settings().pr_reviewer_agent.agent_max_total_findings = 3
         try:
             result = agent._merge_findings([], skills)
             assert len(result) == 3
         finally:
-            get_settings().pr_reviewer.num_max_findings = 3
+            get_settings().pr_reviewer_agent.agent_max_total_findings = original
 
     def test_skill_findings_have_skill_field(self):
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
