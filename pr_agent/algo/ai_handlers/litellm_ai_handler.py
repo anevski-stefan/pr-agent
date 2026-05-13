@@ -431,6 +431,11 @@ class LiteLLMAIHandler(BaseAiHandler):
         response_log = self.prepare_logs(response_obj, system, user, resp, finish_reason)
         get_logger().debug("Full_response", artifact=response_log)
 
+        try:
+            self.last_call_cost = float(response_obj.get("usage", {}).get("cost", 0) or 0)
+        except Exception:
+            self.last_call_cost = 0.0
+
         # for CLI debugging
         if get_settings().config.verbosity_level >= 2:
             get_logger().info(f"\nAI response:\n{resp}")

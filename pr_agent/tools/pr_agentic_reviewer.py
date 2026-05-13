@@ -74,6 +74,9 @@ class AgenticPRReviewer:
     # Triage phase                                                       #
     # ------------------------------------------------------------------ #
 
+    def _last_call_cost(self) -> float:
+        return float(getattr(self.ai_handler, "last_call_cost", 0) or 0)
+
     def _get_triage_model(self) -> str:
         triage_model = get_settings().pr_reviewer_agent.get("agent_triage_model", "")
         return triage_model if triage_model else get_settings().config.model
@@ -119,7 +122,8 @@ class AgenticPRReviewer:
             system=system,
             user=user,
         )
-        return self._parse_triage_response(response)
+        triage_cost = self._last_call_cost()
+        return self._parse_triage_response(response), triage_cost
 
     # ------------------------------------------------------------------ #
     # Skill execution phase                                              #
@@ -197,7 +201,7 @@ class AgenticPRReviewer:
 
     async def _run_skill(self, skill: SkillDefinition, model: str, diff: str,
                          file_contexts: dict[str, str],
-                         previous_findings: list[dict] | None = None) -> list[SkillFinding]:
+                         previous_findings: list[dict] | None = None) -> tuple[list[SkillFinding], float]:
         system = self._build_skill_system_prompt(skill)
         user = self._build_skill_user_prompt(diff, file_contexts, previous_findings)
         response, _ = await self.ai_handler.chat_completion(
@@ -206,13 +210,14 @@ class AgenticPRReviewer:
             system=system,
             user=user,
         )
-        return self._parse_skill_response(response, skill.name)
+        cost = self._last_call_cost()
+        return self._parse_skill_response(response, skill.name), cost
 
     async def _run_skills_parallel(self, triggered_skills: list[SkillDefinition], triage: TriageResult,
                                    previous_findings: list[dict] | None = None,
-                                   file_context_cache: dict[str, str] | None = None) -> list[SkillFinding]:
+                                   file_context_cache: dict[str, str] | None = None) -> tuple[list[SkillFinding], float]:
         if not triggered_skills:
-            return []
+            return [], 0.0
 
         max_calls = get_settings().pr_reviewer_agent.agent_max_skill_calls
         skills_to_run = triggered_skills[:max_calls]
@@ -242,12 +247,15 @@ class AgenticPRReviewer:
                     raw_results.append(e)
 
         findings: list[SkillFinding] = []
+        pass_cost: float = 0.0
         for i, result in enumerate(raw_results):
             if isinstance(result, Exception):
                 get_logger().error(f"Skill '{skills_to_run[i].name}' failed: {result}")
             else:
-                findings.extend(result)
-        return findings
+                skill_findings, skill_cost = result
+                findings.extend(skill_findings)
+                pass_cost += skill_cost
+        return findings, pass_cost
 
     # ------------------------------------------------------------------ #
     # Merge phase                                                        #
@@ -328,24 +336,27 @@ class AgenticPRReviewer:
             await self._run_single_shot()
             return
 
-        triage = await self._run_triage(skills)
+        triage, total_cost = await self._run_triage(skills)
         triggered_skills = [s for s in skills if s.name in triage.selected_skills]
 
         max_passes = get_settings().pr_reviewer_agent.get("agent_max_passes", 1)
         all_skill_findings: list[SkillFinding] = []
-        cached_file_contexts: dict[str, str] = {}  
+        cached_file_contexts: dict[str, str] = {}
 
         for pass_num in range(max_passes):
             get_logger().info(f"Agentic review pass {pass_num + 1}/{max_passes}")
             previous = [asdict(f) for f in all_skill_findings][:self._MAX_PREVIOUS_FINDINGS_CONTEXT] or None
-            pass_findings = await self._run_skills_parallel(
+            pass_findings, pass_cost = await self._run_skills_parallel(
                 triggered_skills, triage,
                 previous_findings=previous,
                 file_context_cache=cached_file_contexts,
             )
             all_skill_findings.extend(pass_findings)
+            total_cost += pass_cost
 
         merged = self._merge_findings(triage.initial_findings, all_skill_findings)
+
+        get_logger().info(f"Agentic review total cost: ${total_cost:.4f} USD")
 
         self.reviewer.prediction = self._format_as_prediction(merged, triage)
         self._publish_review(self.reviewer._prepare_pr_review())

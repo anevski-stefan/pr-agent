@@ -128,7 +128,7 @@ class TestRunTriage:
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
         reviewer = _make_reviewer()
         agent = AgenticPRReviewer(reviewer)
-        result = asyncio.run(agent._run_triage([]))
+        result, _ = asyncio.run(agent._run_triage([]))
         assert "security-and-hardening" in result.selected_skills
         assert "code-review-and-quality" in result.selected_skills
 
@@ -136,7 +136,7 @@ class TestRunTriage:
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
         reviewer = _make_reviewer()
         agent = AgenticPRReviewer(reviewer)
-        result = asyncio.run(agent._run_triage([]))
+        result, _ = asyncio.run(agent._run_triage([]))
         assert len(result.file_risk_scores) == 2
         assert result.file_risk_scores[0]["file"] == "src/auth.py"
         assert result.file_risk_scores[0]["risk"] == 4
@@ -145,7 +145,7 @@ class TestRunTriage:
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
         reviewer = _make_reviewer()
         agent = AgenticPRReviewer(reviewer)
-        result = asyncio.run(agent._run_triage([]))
+        result, _ = asyncio.run(agent._run_triage([]))
         assert len(result.initial_findings) == 1
         assert result.initial_findings[0]["issue_header"] == "Missing Rate Limit"
 
@@ -154,7 +154,7 @@ class TestRunTriage:
         reviewer = _make_reviewer()
         reviewer.ai_handler.chat_completion = AsyncMock(return_value=("not valid yaml {{{{", "stop"))
         agent = AgenticPRReviewer(reviewer)
-        result = asyncio.run(agent._run_triage([]))
+        result, _ = asyncio.run(agent._run_triage([]))
         assert result.selected_skills == []
         assert result.initial_findings == []
 
@@ -163,7 +163,7 @@ class TestRunTriage:
         reviewer = _make_reviewer()
         reviewer.ai_handler.chat_completion = AsyncMock(return_value=("review:\n  key: value", "stop"))
         agent = AgenticPRReviewer(reviewer)
-        result = asyncio.run(agent._run_triage([]))
+        result, _ = asyncio.run(agent._run_triage([]))
         assert result.selected_skills == []
         assert result.initial_findings == []
 
@@ -186,7 +186,7 @@ class TestRunSkillsParallel:
         from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
         reviewer = _make_reviewer()
         agent = AgenticPRReviewer(reviewer)
-        result = asyncio.run(agent._run_skills_parallel([], _make_triage(selected=[])))
+        result, _ = asyncio.run(agent._run_skills_parallel([], _make_triage(selected=[])))
         assert result == []
         reviewer.ai_handler.chat_completion.assert_not_called()
 
@@ -211,7 +211,7 @@ class TestRunSkillsParallel:
         reviewer.ai_handler.chat_completion = AsyncMock(return_value=(SKILL_FINDING_RESPONSE, "stop"))
         agent = AgenticPRReviewer(reviewer)
         skill = _make_skill("security-and-hardening")
-        result = asyncio.run(agent._run_skills_parallel([skill], _make_triage()))
+        result, _ = asyncio.run(agent._run_skills_parallel([skill], _make_triage()))
         assert all(f.skill == "security-and-hardening" for f in result)
 
     def test_high_risk_files_fetched_from_provider(self):
@@ -243,7 +243,7 @@ class TestRunSkillsParallel:
         reviewer.git_provider.get_pr_file_content.side_effect = Exception("Network error")
         reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
         agent = AgenticPRReviewer(reviewer)
-        result = asyncio.run(agent._run_skills_parallel([_make_skill()], _make_triage()))
+        result, _ = asyncio.run(agent._run_skills_parallel([_make_skill()], _make_triage()))
         assert result == []
 
     def test_one_skill_exception_does_not_cancel_others(self):
@@ -261,7 +261,7 @@ class TestRunSkillsParallel:
         reviewer.ai_handler.chat_completion = flaky
         agent = AgenticPRReviewer(reviewer)
         skills = [_make_skill("skill-a"), _make_skill("skill-b")]
-        result = asyncio.run(agent._run_skills_parallel(skills, _make_triage(selected=["skill-a", "skill-b"])))
+        result, _ = asyncio.run(agent._run_skills_parallel(skills, _make_triage(selected=["skill-a", "skill-b"])))
         assert len(result) > 0
 
     def test_sequential_mode_exception_does_not_cancel_others(self):
@@ -282,7 +282,7 @@ class TestRunSkillsParallel:
         get_settings().pr_reviewer_agent.agent_parallel_skills = False
         try:
             skills = [_make_skill("skill-a"), _make_skill("skill-b")]
-            result = asyncio.run(agent._run_skills_parallel(skills, _make_triage(selected=["skill-a", "skill-b"])))
+            result, _ = asyncio.run(agent._run_skills_parallel(skills, _make_triage(selected=["skill-a", "skill-b"])))
             assert len(result) > 0
         finally:
             get_settings().pr_reviewer_agent.agent_parallel_skills = True
@@ -311,7 +311,7 @@ class TestRunSkillsParallel:
         agent = AgenticPRReviewer(reviewer)
         get_settings().pr_reviewer_agent.agent_max_findings_per_skill = 2
         try:
-            result = asyncio.run(agent._run_skills_parallel([_make_skill()], _make_triage()))
+            result, _ = asyncio.run(agent._run_skills_parallel([_make_skill()], _make_triage()))
             assert len(result) <= 2
         finally:
             get_settings().pr_reviewer_agent.agent_max_findings_per_skill = 5
@@ -409,7 +409,7 @@ class TestRunEndToEnd:
         agent = AgenticPRReviewer(reviewer)
         skill = _make_skill("security-and-hardening")
         with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
-            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=[])):
+            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=([], 0.0))):
                 asyncio.run(agent.run())
         reviewer.ai_handler.chat_completion.assert_called()
         reviewer.git_provider.publish_comment.assert_called()
@@ -420,7 +420,7 @@ class TestRunEndToEnd:
         agent = AgenticPRReviewer(reviewer)
         skill = _make_skill("security-and-hardening")
         with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
-            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=[])):
+            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=([], 0.0))):
                 asyncio.run(agent.run())
         reviewer.git_provider.publish_comment.assert_called_once()
 
@@ -432,7 +432,7 @@ class TestRun:
         agent = AgenticPRReviewer(reviewer)
         skill = _make_skill("security-and-hardening")
         with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
-            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=[])):
+            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=([], 0.0))):
                 asyncio.run(agent.run())
         reviewer.git_provider.publish_comment.assert_called()
 
@@ -493,7 +493,7 @@ class TestGracefulDegradation:
         reviewer.ai_handler.chat_completion = AsyncMock(return_value=("findings: []", "stop"))
         agent = AgenticPRReviewer(reviewer)
         triage = _make_triage(risk_scores=[{"file": "src/auth.py", "risk": 4}])
-        result = asyncio.run(agent._run_skills_parallel([_make_skill()], triage))
+        result, _ = asyncio.run(agent._run_skills_parallel([_make_skill()], triage))
         assert result == []
 
 
@@ -605,6 +605,6 @@ class TestMultiPass:
         skill = _make_skill("security-and-hardening")
         get_settings().pr_reviewer_agent.agent_max_passes = 1
         with patch("pr_agent.tools.pr_agentic_reviewer.load_review_skills", return_value=[skill]):
-            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=[])):
+            with patch.object(agent, "_run_skills_parallel", new=AsyncMock(return_value=([], 0.0))):
                 asyncio.run(agent.run())
         assert reviewer.ai_handler.chat_completion.call_count == 1
