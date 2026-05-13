@@ -173,8 +173,17 @@ class AgenticPRReviewer:
         parts.append(f"PR diff:\n======\n{diff}\n======")
         return "\n".join(parts)
 
+    @staticmethod
+    def _truncate_at_closing_fence(text: str) -> str:
+        """Strip LLM prose that appears after the closing ``` of a YAML block."""
+        stripped = text.strip()
+        if not stripped.startswith("```"):
+            return stripped
+        closing = stripped.find("\n```", 3)
+        return stripped[:closing] if closing > 0 else stripped
+
     def _parse_skill_response(self, response: str, skill_name: str) -> list[SkillFinding]:
-        data = load_yaml(response.strip(), first_key="findings")
+        data = load_yaml(self._truncate_at_closing_fence(response), first_key="findings")
         if not data or "findings" not in data:
             get_logger().warning(f"Skill '{skill_name}' returned no parseable findings")
             return []
@@ -329,6 +338,15 @@ class AgenticPRReviewer:
         if not self.git_provider.get_files():
             get_logger().info("PR has no files, skipping agentic review")
             return
+
+        if not self.reviewer.patches_diff and hasattr(self.reviewer, "token_handler"):
+            model = self._get_triage_model()
+            self.reviewer.patches_diff = get_pr_diff(
+                self.git_provider,
+                self.reviewer.token_handler,
+                model,
+                add_line_numbers_to_hunks=True,
+            ) or ""
 
         skills = self._discover_skills()
         if not skills:
