@@ -120,6 +120,7 @@ class PRReviewer:
     async def run(self) -> None:
         try:
             if get_settings().pr_reviewer_agent.get("agent_mode", False):
+                await extract_and_cache_pr_tickets(self.git_provider, self.vars)
                 from pr_agent.tools.pr_agentic_reviewer import AgenticPRReviewer
                 return await AgenticPRReviewer(self).run()
 

@@ -91,10 +91,27 @@ class TestPRReviewerDelegation:
             reviewer = _make_pr_reviewer(agent_mode=True)
             mock_agentic = MagicMock()
             mock_agentic.run = AsyncMock(return_value=None)
-            with patch("pr_agent.tools.pr_agentic_reviewer.AgenticPRReviewer", return_value=mock_agentic) as mock_class:
+            with patch("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", new=AsyncMock()), \
+                 patch("pr_agent.tools.pr_agentic_reviewer.AgenticPRReviewer", return_value=mock_agentic) as mock_class:
                 asyncio.run(reviewer.run())
                 mock_class.assert_called_once_with(reviewer)
                 mock_agentic.run.assert_called_once()
+        finally:
+            get_settings().pr_reviewer_agent.agent_mode = False
+
+    def test_agent_mode_true_still_calls_extract_and_cache_pr_tickets(self):
+        """extract_and_cache_pr_tickets must run even when agent_mode=True."""
+        from pr_agent.config_loader import get_settings
+        get_settings().pr_reviewer_agent.agent_mode = True
+        try:
+            reviewer = _make_pr_reviewer(agent_mode=True)
+            mock_agentic = MagicMock()
+            mock_agentic.run = AsyncMock(return_value=None)
+            extract_mock = AsyncMock()
+            with patch("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", extract_mock), \
+                 patch("pr_agent.tools.pr_agentic_reviewer.AgenticPRReviewer", return_value=mock_agentic):
+                asyncio.run(reviewer.run())
+                extract_mock.assert_called_once_with(reviewer.git_provider, reviewer.vars)
         finally:
             get_settings().pr_reviewer_agent.agent_mode = False
 
