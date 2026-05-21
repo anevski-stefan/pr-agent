@@ -33,7 +33,8 @@ triage:
   initial_findings:
     - relevant_file: path/to/file.py
       issue_header: Short Title
-      issue_content: Concrete description of the problem and when it manifests.
+      issue_content: |
+        Concrete description of the problem and when it manifests.
       start_line: 10
       end_line: 14
       severity: critical|high|medium|low
@@ -46,6 +47,7 @@ Rules:
 - `initial_findings` must be empty list `[]` if no clear issues found.
 - `severity` in each finding must be exactly one of: critical, high, medium, low.
 - Never invent line numbers — use only lines visible in the diff.
+- Always use YAML block scalar (`|`) for `issue_content` values. Never write `issue_content` as a plain scalar — values may contain colons which break YAML parsing.
 """
 
 user="""
